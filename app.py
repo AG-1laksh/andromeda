@@ -57,6 +57,69 @@ _DIVIDE_BY_RE = re.compile(
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 _WORD_RE = re.compile(r"[a-z0-9]+")
+_QUOTED_TEXT_RE = re.compile(r'"([^"\n]+)"|\'([^\'\n]+)\'')
+
+_MONTHS = {
+    "jan": "January",
+    "january": "January",
+    "feb": "February",
+    "february": "February",
+    "mar": "March",
+    "march": "March",
+    "apr": "April",
+    "april": "April",
+    "may": "May",
+    "jun": "June",
+    "june": "June",
+    "jul": "July",
+    "july": "July",
+    "aug": "August",
+    "august": "August",
+    "sep": "September",
+    "sept": "September",
+    "september": "September",
+    "oct": "October",
+    "october": "October",
+    "nov": "November",
+    "november": "November",
+    "dec": "December",
+    "december": "December",
+}
+
+_MONTH_NAMES_BY_NUM = {
+    1: "January",
+    2: "February",
+    3: "March",
+    4: "April",
+    5: "May",
+    6: "June",
+    7: "July",
+    8: "August",
+    9: "September",
+    10: "October",
+    11: "November",
+    12: "December",
+}
+
+_DATE_DMY_TEXT_RE = re.compile(
+    r"\b(\d{1,2})(?:st|nd|rd|th)?\s+"
+    r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
+    r"sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s*,?\s*(\d{4})\b",
+    re.IGNORECASE,
+)
+
+_DATE_MDY_TEXT_RE = re.compile(
+    r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
+    r"sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+"
+    r"(\d{1,2})(?:st|nd|rd|th)?\s*,?\s*(\d{4})\b",
+    re.IGNORECASE,
+)
+
+_DATE_ISO_RE = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
+_DATE_NUMERIC_RE = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b")
+_DATE_CANONICAL_RE = re.compile(
+    r"^\d{1,2}\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}$"
+)
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -70,6 +133,94 @@ def _format_number(value: float) -> str:
     if abs(value - int(value)) < 1e-9:
         return str(int(value))
     return f"{value:.12g}"
+
+
+def _normalize_year(year_str: str) -> int:
+    y = int(year_str)
+    if len(year_str) == 2:
+        return 2000 + y if y <= 69 else 1900 + y
+    return y
+
+
+def _canonical_date(day: int, month_name: str, year: int) -> Optional[str]:
+    if not (1 <= day <= 31 and 1900 <= year <= 2100):
+        return None
+    month = _MONTHS.get(month_name.lower())
+    if not month:
+        return None
+    return f"{day} {month} {year}"
+
+
+def _extract_date_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+
+    m = _DATE_DMY_TEXT_RE.search(text)
+    if m:
+        day = int(m.group(1))
+        month_name = m.group(2)
+        year = int(m.group(3))
+        return _canonical_date(day, month_name, year)
+
+    m = _DATE_MDY_TEXT_RE.search(text)
+    if m:
+        month_name = m.group(1)
+        day = int(m.group(2))
+        year = int(m.group(3))
+        return _canonical_date(day, month_name, year)
+
+    m = _DATE_ISO_RE.search(text)
+    if m:
+        year = int(m.group(1))
+        month_num = int(m.group(2))
+        day = int(m.group(3))
+        if 1 <= month_num <= 12 and 1 <= day <= 31:
+            month_name = _MONTH_NAMES_BY_NUM[month_num]
+            return f"{day} {month_name} {year}"
+
+    m = _DATE_NUMERIC_RE.search(text)
+    if m:
+        first = int(m.group(1))
+        second = int(m.group(2))
+        year = _normalize_year(m.group(3))
+
+        if first > 12 and 1 <= second <= 12:
+            day = first
+            month_num = second
+        elif second > 12 and 1 <= first <= 12:
+            day = second
+            month_num = first
+        else:
+            # Ambiguous case: default to day-first for consistency.
+            day = first
+            month_num = second
+
+        if 1 <= month_num <= 12 and 1 <= day <= 31 and 1900 <= year <= 2100:
+            month_name = _MONTH_NAMES_BY_NUM[month_num]
+            return f"{day} {month_name} {year}"
+
+    return None
+
+
+def extract_date_query(query: str) -> Optional[str]:
+    if not isinstance(query, str) or not query.strip():
+        return None
+
+    lowered = query.lower()
+    if "date" not in lowered and not re.search(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{1,2}-\d{1,2})\b", query):
+        if not re.search(
+            r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b",
+            lowered,
+        ):
+            return None
+
+    for qm in _QUOTED_TEXT_RE.finditer(query):
+        quoted = qm.group(1) or qm.group(2) or ""
+        extracted = _extract_date_from_text(quoted)
+        if extracted:
+            return extracted
+
+    return _extract_date_from_text(query)
 
 
 def parse_arithmetic_query(query: str) -> Optional[Tuple[str, float, float]]:
@@ -317,6 +468,9 @@ def sanitize_output(text: str) -> str:
     if not cleaned:
         return "I cannot determine the answer."
 
+    if _DATE_CANONICAL_RE.match(cleaned):
+        return cleaned
+
     # Preserve exact arithmetic phrasing and decimals while forcing final period.
     arith_match = re.match(
         r"^(The (sum|difference|product|quotient) is [+-]?(?:\d+(?:\.\d+)?|\.\d+|undefined))",
@@ -410,23 +564,27 @@ def answer():
     if not is_valid:
         return jsonify({"error": err}), 400
 
-    arithmetic = parse_arithmetic_query(query)
-    if arithmetic:
-        operation, left, right = arithmetic
-        raw_output = solve_arithmetic(operation, left, right)
+    extracted_date = extract_date_query(query)
+    if extracted_date:
+        raw_output = extracted_date
     else:
-        context = _assets_context(assets)
-        extractive = _extractive_answer(query, context)
-        if extractive:
-            raw_output = extractive
+        arithmetic = parse_arithmetic_query(query)
+        if arithmetic:
+            operation, left, right = arithmetic
+            raw_output = solve_arithmetic(operation, left, right)
         else:
-            raw_output = "I cannot determine the answer."
-            if _env_flag("ENABLE_LLM_FALLBACK", False):
-                wiki_answer = _wikipedia_summary(query)
-                if wiki_answer:
-                    raw_output = wiki_answer
-                else:
-                    raw_output = llm_style_fallback(query, assets)
+            context = _assets_context(assets)
+            extractive = _extractive_answer(query, context)
+            if extractive:
+                raw_output = extractive
+            else:
+                raw_output = "I cannot determine the answer."
+                if _env_flag("ENABLE_LLM_FALLBACK", False):
+                    wiki_answer = _wikipedia_summary(query)
+                    if wiki_answer:
+                        raw_output = wiki_answer
+                    else:
+                        raw_output = llm_style_fallback(query, assets)
 
     final_output = sanitize_output(raw_output)
     return jsonify(build_output_payload(final_output)), 200
